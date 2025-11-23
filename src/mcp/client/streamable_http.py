@@ -59,6 +59,23 @@ class ResumptionError(StreamableHTTPError):
 
 
 @dataclass
+class StreamableHTTPReconnectionOptions:
+    """Configuration options for reconnection behavior of StreamableHTTPTransport.
+
+    Attributes:
+        initial_reconnection_delay: Initial backoff time in seconds. Default is 1.0.
+        max_reconnection_delay: Maximum backoff time in seconds. Default is 30.0.
+        reconnection_delay_grow_factor: Factor by which delay increases. Default is 1.5.
+        max_retries: Maximum reconnection attempts. Default is 2.
+    """
+
+    initial_reconnection_delay: float = 1.0
+    max_reconnection_delay: float = 30.0
+    reconnection_delay_grow_factor: float = 1.5
+    max_retries: int = 2
+
+
+@dataclass
 class RequestContext:
     """Context for a request operation."""
 
@@ -81,6 +98,7 @@ class StreamableHTTPTransport:
         timeout: float | timedelta = 30,
         sse_read_timeout: float | timedelta = 60 * 5,
         auth: httpx.Auth | None = None,
+        reconnection_options: StreamableHTTPReconnectionOptions | None = None,
     ) -> None:
         """Initialize the StreamableHTTP transport.
 
@@ -90,6 +108,7 @@ class StreamableHTTPTransport:
             timeout: HTTP timeout for regular operations.
             sse_read_timeout: Timeout for SSE read operations.
             auth: Optional HTTPX authentication handler.
+            reconnection_options: Options for configuring reconnection behavior.
         """
         self.url = url
         self.headers = headers or {}
@@ -100,6 +119,8 @@ class StreamableHTTPTransport:
         self.auth = auth
         self.session_id = None
         self.protocol_version = None
+        self.reconnection_options = reconnection_options or StreamableHTTPReconnectionOptions()
+        self._server_retry_seconds: float | None = None  # Server-provided retry delay
         self.request_headers = {
             ACCEPT: f"{JSON}, {SSE}",
             CONTENT_TYPE: JSON,
@@ -150,6 +171,24 @@ class StreamableHTTPTransport:
                 )  # pragma: no cover
                 logger.warning(f"Raw result: {message.root.result}")
 
+    def _get_next_reconnection_delay(self, attempt: int) -> float:
+        """Calculate the next reconnection delay using exponential backoff.
+
+        Args:
+            attempt: Current reconnection attempt count
+
+        Returns:
+            Time to wait in seconds before next reconnection attempt
+        """
+        # Use server-provided retry value if available
+        if self._server_retry_seconds is not None:
+            return self._server_retry_seconds
+
+        # Fall back to exponential backoff
+        opts = self.reconnection_options
+        delay = opts.initial_reconnection_delay * (opts.reconnection_delay_grow_factor**attempt)
+        return min(delay, opts.max_reconnection_delay)
+
     async def _handle_sse_event(
         self,
         sse: ServerSentEvent,
@@ -157,8 +196,21 @@ class StreamableHTTPTransport:
         original_request_id: RequestId | None = None,
         resumption_callback: Callable[[str], Awaitable[None]] | None = None,
         is_initialization: bool = False,
-    ) -> bool:
-        """Handle an SSE event, returning True if the response is complete."""
+    ) -> tuple[bool, bool]:
+        """Handle an SSE event.
+
+        Returns:
+            Tuple of (is_complete, has_event_id) where:
+            - is_complete: True if the response stream is complete (got response/error)
+            - has_event_id: True if this event had an ID (indicating resumability)
+        """
+        event_id = sse.id  # httpx_sse defaults to "" for missing ID
+        has_event_id = bool(event_id)  # True if non-empty string
+
+        # Capture server-provided retry value for reconnection timing
+        if sse.retry is not None:
+            self._server_retry_seconds = sse.retry / 1000.0  # Convert ms to seconds
+
         if sse.event == "message":
             try:
                 message = JSONRPCMessage.model_validate_json(sse.data)
@@ -176,20 +228,24 @@ class StreamableHTTPTransport:
                 await read_stream_writer.send(session_message)
 
                 # Call resumption token callback if we have an ID
-                if sse.id and resumption_callback:
-                    await resumption_callback(sse.id)
+                if has_event_id and resumption_callback:
+                    await resumption_callback(event_id)
 
                 # If this is a response or error return True indicating completion
                 # Otherwise, return False to continue listening
-                return isinstance(message.root, JSONRPCResponse | JSONRPCError)
+                return isinstance(message.root, JSONRPCResponse | JSONRPCError), has_event_id
 
             except Exception as exc:  # pragma: no cover
                 logger.exception("Error parsing SSE message")
                 await read_stream_writer.send(exc)
-                return False
+                return False, has_event_id
         else:  # pragma: no cover
-            logger.warning(f"Unknown SSE event: {sse.event}")
-            return False
+            # Empty event or priming event - not a completion, but may have ID
+            # httpx_sse defaults event to "message", so this handles non-standard events
+            if has_event_id and resumption_callback:
+                # Priming event - call resumption callback
+                await resumption_callback(event_id)
+            return False, has_event_id
 
     async def handle_get_stream(
         self,
@@ -214,7 +270,7 @@ class StreamableHTTPTransport:
                 logger.debug("GET SSE connection established")
 
                 async for sse in event_source.aiter_sse():
-                    await self._handle_sse_event(sse, read_stream_writer)
+                    _is_complete, _has_event_id = await self._handle_sse_event(sse, read_stream_writer)
 
         except Exception as exc:
             logger.debug(f"GET stream error (non-fatal): {exc}")  # pragma: no cover
@@ -243,7 +299,7 @@ class StreamableHTTPTransport:
             logger.debug("Resumption GET SSE connection established")
 
             async for sse in event_source.aiter_sse():  # pragma: no branch
-                is_complete = await self._handle_sse_event(
+                is_complete, _has_event_id = await self._handle_sse_event(
                     sse,
                     ctx.read_stream_writer,
                     original_request_id,
@@ -288,7 +344,11 @@ class StreamableHTTPTransport:
                 if content_type.startswith(JSON):
                     await self._handle_json_response(response, ctx.read_stream_writer, is_initialization)
                 elif content_type.startswith(SSE):
-                    await self._handle_sse_response(response, ctx, is_initialization)
+                    # Note: _handle_sse_response returns (has_priming_event, last_event_id)
+                    # which can be used for reconnection logic if needed
+                    _has_priming_event, _last_event_id = await self._handle_sse_response(
+                        response, ctx, is_initialization
+                    )
                 else:
                     await self._handle_unexpected_content_type(  # pragma: no cover
                         content_type,  # pragma: no cover
@@ -321,18 +381,33 @@ class StreamableHTTPTransport:
         response: httpx.Response,
         ctx: RequestContext,
         is_initialization: bool = False,
-    ) -> None:
-        """Handle SSE response from the server."""
+    ) -> tuple[bool, str | None]:
+        """Handle SSE response from the server.
+
+        Returns:
+            Tuple of (has_priming_event, last_event_id) where:
+            - has_priming_event: True if any event had an ID (priming event received)
+            - last_event_id: The last event ID received, for resumption
+        """
+        has_priming_event = False
+        last_event_id: str | None = None
+
         try:
             event_source = EventSource(response)
             async for sse in event_source.aiter_sse():  # pragma: no branch
-                is_complete = await self._handle_sse_event(
+                is_complete, has_event_id = await self._handle_sse_event(
                     sse,
                     ctx.read_stream_writer,
                     resumption_callback=(ctx.metadata.on_resumption_token_update if ctx.metadata else None),
                     is_initialization=is_initialization,
                 )
-                # If the SSE event indicates completion, like returning respose/error
+
+                # Track priming events
+                if has_event_id:
+                    has_priming_event = True
+                    last_event_id = sse.id
+
+                # If the SSE event indicates completion, like returning response/error
                 # break the loop
                 if is_complete:
                     await response.aclose()
@@ -340,6 +415,8 @@ class StreamableHTTPTransport:
         except Exception as e:
             logger.exception("Error reading SSE stream:")  # pragma: no cover
             await ctx.read_stream_writer.send(e)  # pragma: no cover
+
+        return has_priming_event, last_event_id
 
     async def _handle_unexpected_content_type(
         self,
@@ -442,6 +519,61 @@ class StreamableHTTPTransport:
         """Get the current session ID."""
         return self.session_id
 
+    async def resume_stream(
+        self,
+        client: httpx.AsyncClient,
+        read_stream_writer: StreamWriter,
+        last_event_id: str,
+        on_resumption_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        """Resume SSE stream from a previous event ID.
+
+        This method allows clients to reconnect and resume receiving events
+        from where they left off using the Last-Event-ID header.
+
+        Args:
+            client: The HTTP client to use for the request
+            read_stream_writer: Stream writer for sending received messages
+            last_event_id: The last event ID received, to resume from
+            on_resumption_token: Optional callback invoked with new event IDs
+        """
+        if not self.session_id:
+            logger.warning("Cannot resume stream without a session ID")
+            return
+
+        headers = self._prepare_request_headers(self.request_headers)
+        headers[LAST_EVENT_ID] = last_event_id
+
+        try:
+            async with aconnect_sse(
+                client,
+                "GET",
+                self.url,
+                headers=headers,
+                timeout=httpx.Timeout(self.timeout, read=self.sse_read_timeout),
+            ) as event_source:
+                event_source.response.raise_for_status()
+                logger.debug(f"Resumed SSE stream from event ID: {last_event_id}")
+
+                async for sse in event_source.aiter_sse():
+                    _is_complete, has_event_id = await self._handle_sse_event(
+                        sse,
+                        read_stream_writer,
+                        resumption_callback=on_resumption_token,
+                    )
+
+                    # Call resumption callback if we have a new event ID
+                    if has_event_id and sse.id and on_resumption_token:
+                        await on_resumption_token(sse.id)
+
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 405:
+                logger.debug("Server does not support SSE resumption via GET")
+            else:
+                logger.warning(f"Failed to resume stream: {exc}")
+        except Exception as exc:
+            logger.debug(f"Resume stream error: {exc}")
+
 
 @asynccontextmanager
 async def streamablehttp_client(
@@ -452,6 +584,7 @@ async def streamablehttp_client(
     terminate_on_close: bool = True,
     httpx_client_factory: McpHttpClientFactory = create_mcp_http_client,
     auth: httpx.Auth | None = None,
+    reconnection_options: StreamableHTTPReconnectionOptions | None = None,
 ) -> AsyncGenerator[
     tuple[
         MemoryObjectReceiveStream[SessionMessage | Exception],
@@ -466,13 +599,23 @@ async def streamablehttp_client(
     `sse_read_timeout` determines how long (in seconds) the client will wait for a new
     event before disconnecting. All other HTTP operations are controlled by `timeout`.
 
+    Args:
+        url: The endpoint URL.
+        headers: Optional headers to include in requests.
+        timeout: HTTP timeout for regular operations.
+        sse_read_timeout: Timeout for SSE read operations.
+        terminate_on_close: Whether to terminate the session on close.
+        httpx_client_factory: Factory function to create the HTTP client.
+        auth: Optional HTTPX authentication handler.
+        reconnection_options: Options for configuring reconnection behavior.
+
     Yields:
         Tuple containing:
             - read_stream: Stream for reading messages from the server
             - write_stream: Stream for sending messages to the server
             - get_session_id_callback: Function to retrieve the current session ID
     """
-    transport = StreamableHTTPTransport(url, headers, timeout, sse_read_timeout, auth)
+    transport = StreamableHTTPTransport(url, headers, timeout, sse_read_timeout, auth, reconnection_options)
 
     read_stream_writer, read_stream = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)

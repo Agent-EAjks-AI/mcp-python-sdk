@@ -140,6 +140,7 @@ class StreamableHTTPServerTransport:
         is_json_response_enabled: bool = False,
         event_store: EventStore | None = None,
         security_settings: TransportSecuritySettings | None = None,
+        retry_interval: int | None = None,
     ) -> None:
         """
         Initialize a new StreamableHTTP server transport.
@@ -153,6 +154,10 @@ class StreamableHTTPServerTransport:
                         resumability will be enabled, allowing clients to
                         reconnect and resume messages.
             security_settings: Optional security settings for DNS rebinding protection.
+            retry_interval: Optional SSE retry interval in milliseconds.
+                           When set, this value is sent to clients in the SSE
+                           `retry` field, telling them how long to wait before
+                           reconnecting after a disconnect.
 
         Raises:
             ValueError: If the session ID contains invalid characters.
@@ -164,6 +169,7 @@ class StreamableHTTPServerTransport:
         self.is_json_response_enabled = is_json_response_enabled
         self._event_store = event_store
         self._security = TransportSecurityMiddleware(security_settings)
+        self._retry_interval = retry_interval
         self._request_streams: dict[
             RequestId,
             tuple[
@@ -243,6 +249,37 @@ class StreamableHTTPServerTransport:
         # If an event ID was provided, include it
         if event_message.event_id:
             event_data["id"] = event_message.event_id
+
+        return event_data
+
+    async def _create_priming_event(self, stream_id: str) -> dict[str, str] | None:
+        """Create a priming event to establish resumption capability.
+
+        Only sends if eventStore is configured (opt-in for resumability).
+
+        Args:
+            stream_id: The ID of the stream to create the priming event for
+
+        Returns:
+            Event data dictionary for the priming event, or None if no event store
+        """
+        if self._event_store is None:
+            return None
+
+        # Store an empty message to get an event ID
+        # Using an empty dict as a placeholder - it won't be sent as actual data
+        priming_event_id = await self._event_store.store_event(
+            stream_id, JSONRPCMessage.model_validate({"jsonrpc": "2.0", "method": "_priming"})
+        )
+
+        event_data: dict[str, str] = {
+            "id": priming_event_id,
+            "data": "",  # Empty data for priming event
+        }
+
+        # Add retry interval if configured
+        if self._retry_interval is not None:
+            event_data["retry"] = str(self._retry_interval)
 
         return event_data
 
@@ -463,6 +500,11 @@ class StreamableHTTPServerTransport:
                     # Get the request ID from the incoming request message
                     try:
                         async with sse_stream_writer, request_stream_reader:
+                            # Send priming event first if event store is configured
+                            priming_event = await self._create_priming_event(request_id)
+                            if priming_event is not None:
+                                await sse_stream_writer.send(priming_event)
+
                             # Process messages from the request-specific stream
                             async for event_message in request_stream_reader:
                                 # Build the event data
@@ -583,6 +625,11 @@ class StreamableHTTPServerTransport:
                 standalone_stream_reader = self._request_streams[GET_STREAM_KEY][1]
 
                 async with sse_stream_writer, standalone_stream_reader:
+                    # Send priming event first if event store is configured
+                    priming_event = await self._create_priming_event(GET_STREAM_KEY)
+                    if priming_event is not None:
+                        await sse_stream_writer.send(priming_event)
+
                     # Process messages from the standalone stream
                     async for event_message in standalone_stream_reader:
                         # For the standalone stream, we handle:
@@ -668,6 +715,27 @@ class StreamableHTTPServerTransport:
         except Exception as e:  # pragma: no cover
             # During cleanup, we catch all exceptions since streams might be in various states
             logger.debug(f"Error closing streams: {e}")
+
+    async def close_sse_stream(self, request_id: RequestId) -> None:
+        """Close an SSE stream for a specific request, triggering client reconnection.
+
+        Use this to implement polling behavior during long-running operations -
+        client will reconnect after the retry interval specified in the priming event.
+
+        Args:
+            request_id: The request ID (or stream key) of the stream to close
+        """
+        request_id_str = str(request_id)
+        if request_id_str in self._request_streams:
+            try:
+                sender, receiver = self._request_streams[request_id_str]
+                await sender.aclose()
+                await receiver.aclose()
+            except Exception:
+                # Stream might already be closed
+                logger.debug(f"Error closing SSE stream {request_id_str} - may already be closed")
+            finally:
+                self._request_streams.pop(request_id_str, None)
 
     async def _handle_unsupported_request(self, request: Request, send: Send) -> None:  # pragma: no cover
         """Handle unsupported HTTP methods."""
