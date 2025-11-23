@@ -39,7 +39,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.context import RequestContext
 from mcp.shared.exceptions import McpError
-from mcp.shared.message import ClientMessageMetadata
+from mcp.shared.message import ClientMessageMetadata, SessionMessage
 from mcp.shared.session import RequestResponder
 from mcp.types import InitializeResult, TextContent, TextResourceContents, Tool
 from tests.test_helpers import wait_for_server
@@ -1768,8 +1768,10 @@ async def test_resume_stream_without_session_id():
     transport = StreamableHTTPTransport("http://localhost:8000")
     assert transport.session_id is None
 
-    # Create a dummy stream writer
-    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream(0)
+    # Create a dummy stream writer with type annotation
+    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[
+        SessionMessage | Exception
+    ](0)
 
     async with httpx.AsyncClient() as client:
         # Should return early without making request
@@ -1804,7 +1806,9 @@ async def test_resume_stream_with_405_response(basic_server: None, basic_server_
             transport.session_id = get_session_id()
 
     # Now try to resume with the session - server might return 405
-    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream(0)
+    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[
+        SessionMessage | Exception
+    ](0)
 
     async with httpx.AsyncClient() as client:
         # This should handle the 405 gracefully

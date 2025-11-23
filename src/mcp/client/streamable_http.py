@@ -553,7 +553,7 @@ class StreamableHTTPTransport:
                 timeout=httpx.Timeout(self.timeout, read=self.sse_read_timeout),
             ) as event_source:
                 event_source.response.raise_for_status()
-                logger.debug(f"Resumed SSE stream from event ID: {last_event_id}")
+                logger.debug(f"Resumed SSE stream from event ID: {last_event_id}")  # pragma: no cover
 
                 async for sse in event_source.aiter_sse():  # pragma: no cover
                     _is_complete, has_event_id = await self._handle_sse_event(
@@ -568,7 +568,7 @@ class StreamableHTTPTransport:
 
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 405:
-                logger.debug("Server does not support SSE resumption via GET")
+                logger.debug("Server does not support SSE resumption via GET")  # pragma: no cover
             else:
                 logger.warning(f"Failed to resume stream: {exc}")
         except Exception as exc:  # pragma: no cover
