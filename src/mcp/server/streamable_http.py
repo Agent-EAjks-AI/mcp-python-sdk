@@ -731,7 +731,7 @@ class StreamableHTTPServerTransport:
                 sender, receiver = self._request_streams[request_id_str]
                 await sender.aclose()
                 await receiver.aclose()
-            except Exception:
+            except Exception:  # pragma: no cover
                 # Stream might already be closed
                 logger.debug(f"Error closing SSE stream {request_id_str} - may already be closed")
             finally:

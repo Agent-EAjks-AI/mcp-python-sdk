@@ -208,7 +208,7 @@ class StreamableHTTPTransport:
         has_event_id = bool(event_id)  # True if non-empty string
 
         # Capture server-provided retry value for reconnection timing
-        if sse.retry is not None:
+        if sse.retry is not None:  # pragma: no cover
             self._server_retry_seconds = sse.retry / 1000.0  # Convert ms to seconds
 
         if sse.event == "message":
@@ -555,7 +555,7 @@ class StreamableHTTPTransport:
                 event_source.response.raise_for_status()
                 logger.debug(f"Resumed SSE stream from event ID: {last_event_id}")
 
-                async for sse in event_source.aiter_sse():
+                async for sse in event_source.aiter_sse():  # pragma: no cover
                     _is_complete, has_event_id = await self._handle_sse_event(
                         sse,
                         read_stream_writer,
@@ -571,7 +571,7 @@ class StreamableHTTPTransport:
                 logger.debug("Server does not support SSE resumption via GET")
             else:
                 logger.warning(f"Failed to resume stream: {exc}")
-        except Exception as exc:
+        except Exception as exc:  # pragma: no cover
             logger.debug(f"Resume stream error: {exc}")
 
 

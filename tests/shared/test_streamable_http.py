@@ -1833,9 +1833,7 @@ async def test_reconnection_options_dataclass():
 
 
 @pytest.mark.anyio
-async def test_streamablehttp_client_with_reconnection_options(
-    basic_server: None, basic_server_url: str
-):
+async def test_streamablehttp_client_with_reconnection_options(basic_server: None, basic_server_url: str):
     """Test streamablehttp_client accepts reconnection_options parameter."""
     from mcp.client.streamable_http import StreamableHTTPReconnectionOptions
 
