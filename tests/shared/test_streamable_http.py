@@ -1799,7 +1799,9 @@ async def test_resume_stream_with_405_response(basic_server: None, basic_server_
             transport.session_id = get_session_id()
 
     # Now try to resume with the session - server might return 405
-    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[SessionMessage | Exception](0)
+    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[SessionMessage | Exception](
+        0
+    )  # pragma: no cover - xdist coverage bug on 3.11
 
     async with httpx.AsyncClient() as client:
         # This should handle the 405 gracefully
