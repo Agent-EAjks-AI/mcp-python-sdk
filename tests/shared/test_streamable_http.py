@@ -1608,11 +1608,6 @@ async def test_client_crash_handled(basic_server: None, basic_server_url: str):
             assert tools.tools
 
 
-# =============================================================================
-# SEP-1699: SSE Polling Support Tests
-# =============================================================================
-
-
 @pytest.mark.anyio
 async def test_reconnection_delay_with_server_retry():
     """Test _get_next_reconnection_delay uses server-provided retry value."""
@@ -1769,9 +1764,7 @@ async def test_resume_stream_without_session_id():
     assert transport.session_id is None
 
     # Create a dummy stream writer with type annotation
-    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[
-        SessionMessage | Exception
-    ](0)
+    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[SessionMessage | Exception](0)
 
     async with httpx.AsyncClient() as client:
         # Should return early without making request
@@ -1806,9 +1799,7 @@ async def test_resume_stream_with_405_response(basic_server: None, basic_server_
             transport.session_id = get_session_id()
 
     # Now try to resume with the session - server might return 405
-    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[
-        SessionMessage | Exception
-    ](0)
+    read_stream_writer, read_stream_reader = anyio.create_memory_object_stream[SessionMessage | Exception](0)
 
     async with httpx.AsyncClient() as client:
         # This should handle the 405 gracefully

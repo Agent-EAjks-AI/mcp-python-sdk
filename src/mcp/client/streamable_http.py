@@ -100,16 +100,7 @@ class StreamableHTTPTransport:
         auth: httpx.Auth | None = None,
         reconnection_options: StreamableHTTPReconnectionOptions | None = None,
     ) -> None:
-        """Initialize the StreamableHTTP transport.
-
-        Args:
-            url: The endpoint URL.
-            headers: Optional headers to include in requests.
-            timeout: HTTP timeout for regular operations.
-            sse_read_timeout: Timeout for SSE read operations.
-            auth: Optional HTTPX authentication handler.
-            reconnection_options: Options for configuring reconnection behavior.
-        """
+        """Initialize the StreamableHTTP transport."""
         self.url = url
         self.headers = headers or {}
         self.timeout = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
@@ -344,11 +335,7 @@ class StreamableHTTPTransport:
                 if content_type.startswith(JSON):
                     await self._handle_json_response(response, ctx.read_stream_writer, is_initialization)
                 elif content_type.startswith(SSE):
-                    # Note: _handle_sse_response returns (has_priming_event, last_event_id)
-                    # which can be used for reconnection logic if needed
-                    _has_priming_event, _last_event_id = await self._handle_sse_response(
-                        response, ctx, is_initialization
-                    )
+                    await self._handle_sse_response(response, ctx, is_initialization)
                 else:
                     await self._handle_unexpected_content_type(  # pragma: no cover
                         content_type,  # pragma: no cover
@@ -598,22 +585,6 @@ async def streamablehttp_client(
 
     `sse_read_timeout` determines how long (in seconds) the client will wait for a new
     event before disconnecting. All other HTTP operations are controlled by `timeout`.
-
-    Args:
-        url: The endpoint URL.
-        headers: Optional headers to include in requests.
-        timeout: HTTP timeout for regular operations.
-        sse_read_timeout: Timeout for SSE read operations.
-        terminate_on_close: Whether to terminate the session on close.
-        httpx_client_factory: Factory function to create the HTTP client.
-        auth: Optional HTTPX authentication handler.
-        reconnection_options: Options for configuring reconnection behavior.
-
-    Yields:
-        Tuple containing:
-            - read_stream: Stream for reading messages from the server
-            - write_stream: Stream for sending messages to the server
-            - get_session_id_callback: Function to retrieve the current session ID
     """
     transport = StreamableHTTPTransport(url, headers, timeout, sse_read_timeout, auth, reconnection_options)
 
