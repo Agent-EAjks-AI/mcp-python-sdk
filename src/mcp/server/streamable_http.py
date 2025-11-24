@@ -239,9 +239,9 @@ class StreamableHTTPServerTransport:
         """Extract the session ID from request headers."""
         return request.headers.get(MCP_SESSION_ID_HEADER)
 
-    def _create_event_data(self, event_message: EventMessage) -> dict[str, str]:  # pragma: no cover
+    def _create_event_data(self, event_message: EventMessage) -> dict[str, str | int]:  # pragma: no cover
         """Create event data dictionary from an EventMessage."""
-        event_data = {
+        event_data: dict[str, str | int] = {
             "event": "message",
             "data": event_message.message.model_dump_json(by_alias=True, exclude_none=True),
         }
@@ -252,7 +252,7 @@ class StreamableHTTPServerTransport:
 
         return event_data
 
-    async def _create_priming_event(self, stream_id: str) -> dict[str, str] | None:
+    async def _create_priming_event(self, stream_id: str) -> dict[str, str | int] | None:
         """Create a priming event to establish resumption capability.
 
         Only sends if eventStore is configured (opt-in for resumability).
@@ -272,14 +272,14 @@ class StreamableHTTPServerTransport:
             stream_id, JSONRPCMessage.model_validate({"jsonrpc": "2.0", "method": "_priming"})
         )
 
-        event_data: dict[str, str] = {
+        event_data: dict[str, str | int] = {
             "id": priming_event_id,
             "data": "",  # Empty data for priming event
         }
 
-        # Add retry interval if configured
+        # Add retry interval if configured (sse_starlette expects int, not str)
         if self._retry_interval is not None:
-            event_data["retry"] = str(self._retry_interval)
+            event_data["retry"] = self._retry_interval
 
         return event_data
 
@@ -494,7 +494,7 @@ class StreamableHTTPServerTransport:
                     await self._clean_up_memory_streams(request_id)
             else:  # pragma: no cover
                 # Create SSE stream
-                sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str]](0)
+                sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str | int]](0)
 
                 async def sse_writer():
                     # Get the request ID from the incoming request message
@@ -615,7 +615,7 @@ class StreamableHTTPServerTransport:
             return
 
         # Create SSE stream
-        sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str]](0)
+        sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str | int]](0)
 
         async def standalone_sse_writer():
             try:
@@ -831,7 +831,7 @@ class StreamableHTTPServerTransport:
                 headers[MCP_SESSION_ID_HEADER] = self.mcp_session_id
 
             # Create SSE stream for replay
-            sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str]](0)
+            sse_stream_writer, sse_stream_reader = anyio.create_memory_object_stream[dict[str, str | int]](0)
 
             async def replay_sender():
                 try:

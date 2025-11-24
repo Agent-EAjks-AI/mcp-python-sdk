@@ -203,6 +203,13 @@ class StreamableHTTPTransport:
             self._server_retry_seconds = sse.retry / 1000.0  # Convert ms to seconds
 
         if sse.event == "message":
+            # Check for priming event (empty data but may have ID for resumption)
+            if not sse.data or not sse.data.strip():
+                # Priming event - just track the ID for resumption
+                if has_event_id and resumption_callback:
+                    await resumption_callback(event_id)
+                return False, has_event_id
+
             try:
                 message = JSONRPCMessage.model_validate_json(sse.data)
                 logger.debug(f"SSE message: {message}")
@@ -368,8 +375,9 @@ class StreamableHTTPTransport:
         response: httpx.Response,
         ctx: RequestContext,
         is_initialization: bool = False,
+        attempt: int = 0,
     ) -> tuple[bool, str | None]:
-        """Handle SSE response from the server.
+        """Handle SSE response from the server with automatic reconnection.
 
         Returns:
             Tuple of (has_priming_event, last_event_id) where:
@@ -378,6 +386,7 @@ class StreamableHTTPTransport:
         """
         has_priming_event = False
         last_event_id: str | None = None
+        is_complete = False
 
         try:
             event_source = EventSource(response)
@@ -400,10 +409,64 @@ class StreamableHTTPTransport:
                     await response.aclose()
                     break
         except Exception as e:
-            logger.exception("Error reading SSE stream:")  # pragma: no cover
-            await ctx.read_stream_writer.send(e)  # pragma: no cover
+            logger.exception("Error reading SSE stream:")
+            # Don't send exception if we can reconnect
+            if not (has_priming_event and last_event_id):
+                await ctx.read_stream_writer.send(e)
+
+        # Auto-reconnect if stream ended without completion and we have priming event
+        if not is_complete and has_priming_event and last_event_id:
+            await self._attempt_sse_reconnection(ctx, last_event_id, attempt)
 
         return has_priming_event, last_event_id
+
+    async def _attempt_sse_reconnection(
+        self,
+        ctx: RequestContext,
+        last_event_id: str,
+        attempt: int,
+    ) -> None:
+        """Attempt to reconnect to SSE stream using resumption token.
+
+        Called when SSE stream ends without receiving a response/error,
+        but we have a priming event indicating resumability.
+        """
+        max_retries = self.reconnection_options.max_retries
+
+        if attempt >= max_retries:
+            error_msg = f"Max reconnection attempts ({max_retries}) exceeded"
+            logger.error(error_msg)
+            await ctx.read_stream_writer.send(StreamableHTTPError(error_msg))
+            return
+
+        # Calculate delay (uses server retry if available, else exponential backoff)
+        delay = self._get_next_reconnection_delay(attempt)
+        logger.info(f"SSE stream closed, reconnecting in {delay:.1f}s (attempt {attempt + 1}/{max_retries})")
+
+        await anyio.sleep(delay)
+
+        # Build resumption context with last_event_id
+        resumption_metadata = ClientMessageMetadata(
+            resumption_token=last_event_id,
+            on_resumption_token_update=(ctx.metadata.on_resumption_token_update if ctx.metadata else None),
+        )
+
+        resumption_ctx = RequestContext(
+            client=ctx.client,
+            headers=ctx.headers,
+            session_id=ctx.session_id,
+            session_message=ctx.session_message,
+            metadata=resumption_metadata,
+            read_stream_writer=ctx.read_stream_writer,
+            sse_read_timeout=ctx.sse_read_timeout,
+        )
+
+        try:
+            await self._handle_resumption_request(resumption_ctx)
+        except Exception as e:
+            logger.warning(f"Reconnection attempt {attempt + 1} failed: {e}")
+            # Recursive retry with incremented attempt counter
+            await self._attempt_sse_reconnection(ctx, last_event_id, attempt + 1)
 
     async def _handle_unexpected_content_type(
         self,

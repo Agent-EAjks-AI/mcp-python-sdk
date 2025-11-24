@@ -280,3 +280,22 @@ class StreamableHTTPSessionManager:
                 status_code=HTTPStatus.BAD_REQUEST,
             )
             await response(scope, receive, send)
+
+    async def close_sse_stream(self, session_id: str, request_id: str | int) -> bool:
+        """Close an SSE stream for a specific request, triggering client reconnection.
+
+        Use this to implement polling behavior during long-running operations.
+        The client will reconnect after the retry interval specified in the priming event.
+
+        Args:
+            session_id: The MCP session ID (from mcp-session-id header)
+            request_id: The request ID of the stream to close
+
+        Returns:
+            True if the stream was found and closed, False otherwise
+        """
+        if session_id not in self._server_instances:
+            return False
+        transport = self._server_instances[session_id]
+        await transport.close_sse_stream(request_id)
+        return True
