@@ -22,7 +22,7 @@ from starlette.routing import Mount
 
 import mcp.types as types
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import StreamableHTTPReconnectionOptions, streamablehttp_client
 from mcp.server import Server
 from mcp.server.streamable_http import (
     MCP_PROTOCOL_VERSION_HEADER,
@@ -115,9 +115,10 @@ class SimpleEventStore(EventStore):
 
 # Test server implementation that follows MCP protocol
 class ServerTest(Server):  # pragma: no cover
-    def __init__(self):
+    def __init__(self, session_manager_ref: list[StreamableHTTPSessionManager] | None = None):
         super().__init__(SERVER_NAME)
         self._lock = None  # Will be initialized in async context
+        self._session_manager_ref = session_manager_ref or []
 
         @self.read_resource()
         async def handle_read_resource(uri: AnyUrl) -> str | bytes:
@@ -161,6 +162,11 @@ class ServerTest(Server):  # pragma: no cover
                 Tool(
                     name="release_lock",
                     description="A tool that releases the lock",
+                    inputSchema={"type": "object", "properties": {}},
+                ),
+                Tool(
+                    name="tool_with_server_disconnect",
+                    description="A tool that triggers server-initiated SSE disconnect",
                     inputSchema={"type": "object", "properties": {}},
                 ),
             ]
@@ -254,6 +260,37 @@ class ServerTest(Server):  # pragma: no cover
                 self._lock.set()
                 return [TextContent(type="text", text="Lock released")]
 
+            elif name == "tool_with_server_disconnect":
+                # Send first notification
+                await ctx.session.send_log_message(
+                    level="info",
+                    data="First notification before disconnect",
+                    logger="disconnect_tool",
+                    related_request_id=ctx.request_id,
+                )
+
+                # Trigger server-initiated SSE disconnect
+                if self._session_manager_ref:
+                    session_manager = self._session_manager_ref[0]
+                    request = ctx.request
+                    if isinstance(request, Request):
+                        session_id = request.headers.get("mcp-session-id")
+                        if session_id:
+                            await session_manager.close_sse_stream(session_id, ctx.request_id)
+
+                # Wait a bit for client to reconnect
+                await anyio.sleep(0.2)
+
+                # Send second notification after disconnect
+                await ctx.session.send_log_message(
+                    level="info",
+                    data="Second notification after disconnect",
+                    logger="disconnect_tool",
+                    related_request_id=ctx.request_id,
+                )
+
+                return [TextContent(type="text", text="Completed with disconnect")]
+
             return [TextContent(type="text", text=f"Called {name}")]
 
 
@@ -266,8 +303,11 @@ def create_app(
         is_json_response_enabled: If True, use JSON responses instead of SSE streams.
         event_store: Optional event store for testing resumability.
     """
-    # Create server instance
-    server = ServerTest()
+    # Create a reference holder for the session manager
+    session_manager_ref: list[StreamableHTTPSessionManager] = []
+
+    # Create server instance with session manager reference
+    server = ServerTest(session_manager_ref=session_manager_ref)
 
     # Create the session manager
     security_settings = TransportSecuritySettings(
@@ -279,6 +319,9 @@ def create_app(
         json_response=is_json_response_enabled,
         security_settings=security_settings,
     )
+
+    # Store session manager reference for server to access
+    session_manager_ref.append(session_manager)
 
     # Create an ASGI application that uses the session manager
     app = Starlette(
@@ -882,7 +925,7 @@ async def test_streamablehttp_client_tool_invocation(initialized_client_session:
     """Test client tool invocation."""
     # First list tools
     tools = await initialized_client_session.list_tools()
-    assert len(tools.tools) == 6
+    assert len(tools.tools) == 7
     assert tools.tools[0].name == "test_tool"
 
     # Call the tool
@@ -919,7 +962,7 @@ async def test_streamablehttp_client_session_persistence(basic_server: None, bas
 
             # Make multiple requests to verify session persistence
             tools = await session.list_tools()
-            assert len(tools.tools) == 6
+            assert len(tools.tools) == 7
 
             # Read a resource
             resource = await session.read_resource(uri=AnyUrl("foobar://test-persist"))
@@ -948,7 +991,7 @@ async def test_streamablehttp_client_json_response(json_response_server: None, j
 
             # Check tool listing
             tools = await session.list_tools()
-            assert len(tools.tools) == 6
+            assert len(tools.tools) == 7
 
             # Call a tool and verify JSON response handling
             result = await session.call_tool("test_tool", {})
@@ -1019,7 +1062,7 @@ async def test_streamablehttp_client_session_termination(basic_server: None, bas
 
             # Make a request to confirm session is working
             tools = await session.list_tools()
-            assert len(tools.tools) == 6
+            assert len(tools.tools) == 7
 
     headers: dict[str, str] = {}  # pragma: no cover
     if captured_session_id:  # pragma: no cover
@@ -1085,7 +1128,7 @@ async def test_streamablehttp_client_session_termination_204(
 
             # Make a request to confirm session is working
             tools = await session.list_tools()
-            assert len(tools.tools) == 6
+            assert len(tools.tools) == 7
 
     headers: dict[str, str] = {}  # pragma: no cover
     if captured_session_id:  # pragma: no cover
@@ -1852,3 +1895,61 @@ async def test_streamablehttp_client_with_reconnection_options(basic_server: Non
         async with ClientSession(read_stream, write_stream) as session:
             result = await session.initialize()
             assert isinstance(result, InitializeResult)
+
+
+@pytest.mark.anyio
+async def test_streamablehttp_client_auto_reconnection(event_server: tuple[SimpleEventStore, str]):
+    """Test automatic client reconnection when server closes SSE stream mid-operation."""
+    _, server_url = event_server
+
+    # Track notifications received via logging callback
+    notifications_received: list[str] = []
+
+    async def logging_callback(params: types.LoggingMessageNotificationParams) -> None:
+        """Called when a log message notification is received from the server."""
+        data = params.data
+        if data:
+            notifications_received.append(str(data))
+
+    # Configure client with reconnection options (fast delays for testing)
+    reconnection_options = StreamableHTTPReconnectionOptions(
+        initial_reconnection_delay=0.1,
+        max_reconnection_delay=1.0,
+        reconnection_delay_grow_factor=1.2,
+        max_retries=5,
+    )
+
+    async with streamablehttp_client(
+        f"{server_url}/mcp",
+        reconnection_options=reconnection_options,
+    ) as (read_stream, write_stream, get_session_id):
+        async with ClientSession(
+            read_stream,
+            write_stream,
+            logging_callback=logging_callback,
+        ) as session:
+            # Initialize the session
+            result = await session.initialize()
+            assert isinstance(result, InitializeResult)
+
+            session_id = get_session_id()
+            assert session_id is not None
+
+            # Call the tool that triggers server-initiated disconnect
+            tool_result = await session.call_tool("tool_with_server_disconnect", {})
+
+            # Verify the tool completed successfully
+            assert len(tool_result.content) == 1
+            assert tool_result.content[0].type == "text"
+            assert tool_result.content[0].text == "Completed with disconnect"
+
+            # Verify we received all notifications (before and after disconnect)
+            assert len(notifications_received) >= 2, (
+                f"Expected at least 2 notifications, got {len(notifications_received)}: {notifications_received}"
+            )
+            assert any("before disconnect" in n for n in notifications_received), (
+                f"Missing 'before disconnect' notification in: {notifications_received}"
+            )
+            assert any("after disconnect" in n for n in notifications_received), (
+                f"Missing 'after disconnect' notification in: {notifications_received}"
+            )
