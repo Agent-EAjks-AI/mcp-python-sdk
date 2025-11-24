@@ -1667,7 +1667,7 @@ async def test_create_priming_event_with_event_store():
     assert "id" in priming_event
     assert priming_event["id"] == "1"  # First event ID from SimpleEventStore
     assert priming_event["data"] == ""  # Empty data for priming
-    assert priming_event["retry"] == "5000"
+    assert priming_event["retry"] == 5000
 
 
 @pytest.mark.anyio
