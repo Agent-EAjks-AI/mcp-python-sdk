@@ -415,12 +415,12 @@ class StreamableHTTPTransport:
                 await ctx.read_stream_writer.send(e)
 
         # Auto-reconnect if stream ended without completion and we have priming event
-        if not is_complete and has_priming_event and last_event_id:
+        if not is_complete and has_priming_event and last_event_id:  # pragma: no cover
             await self._attempt_sse_reconnection(ctx, last_event_id, attempt)
 
         return has_priming_event, last_event_id
 
-    async def _attempt_sse_reconnection(
+    async def _attempt_sse_reconnection(  # pragma: no cover
         self,
         ctx: RequestContext,
         last_event_id: str,

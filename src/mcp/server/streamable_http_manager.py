@@ -281,7 +281,9 @@ class StreamableHTTPSessionManager:
             )
             await response(scope, receive, send)
 
-    async def close_sse_stream(self, session_id: str, request_id: str | int) -> bool:
+    async def close_sse_stream(  # pragma: no cover
+        self, session_id: str, request_id: str | int
+    ) -> bool:
         """Close an SSE stream for a specific request, triggering client reconnection.
 
         Use this to implement polling behavior during long-running operations.

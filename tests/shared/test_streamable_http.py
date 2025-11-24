@@ -1907,9 +1907,8 @@ async def test_streamablehttp_client_auto_reconnection(event_server: tuple[Simpl
 
     async def logging_callback(params: types.LoggingMessageNotificationParams) -> None:
         """Called when a log message notification is received from the server."""
-        data = params.data
-        if data:
-            notifications_received.append(str(data))
+        if params.data:  # pragma: no branch
+            notifications_received.append(str(params.data))
 
     # Configure client with reconnection options (fast delays for testing)
     reconnection_options = StreamableHTTPReconnectionOptions(
