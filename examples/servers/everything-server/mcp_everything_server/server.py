@@ -88,6 +88,7 @@ event_store = SimpleEventStore()
 mcp = FastMCP(
     name="mcp-conformance-test-server",
     event_store=event_store,
+    sse_retry_interval=3000,  # 3 seconds
 )
 
 
