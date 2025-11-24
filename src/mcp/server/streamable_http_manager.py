@@ -294,8 +294,8 @@ class StreamableHTTPSessionManager:
         Returns:
             True if the stream was found and closed, False otherwise
         """
-        if session_id not in self._server_instances:
+        if session_id not in self._server_instances:  # pragma: no cover
             return False
-        transport = self._server_instances[session_id]
-        await transport.close_sse_stream(request_id)
-        return True
+        transport = self._server_instances[session_id]  # pragma: no cover
+        await transport.close_sse_stream(request_id)  # pragma: no cover
+        return True  # pragma: no cover

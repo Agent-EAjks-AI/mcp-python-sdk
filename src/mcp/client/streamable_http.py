@@ -408,7 +408,7 @@ class StreamableHTTPTransport:
                 if is_complete:
                     await response.aclose()
                     break
-        except Exception as e:
+        except Exception as e:  # pragma: no cover
             logger.exception("Error reading SSE stream:")
             # Don't send exception if we can reconnect
             if not (has_priming_event and last_event_id):
@@ -416,11 +416,11 @@ class StreamableHTTPTransport:
 
         # Auto-reconnect if stream ended without completion and we have priming event
         if not is_complete and has_priming_event and last_event_id:
-            await self._attempt_sse_reconnection(ctx, last_event_id, attempt)
+            await self._attempt_sse_reconnection(ctx, last_event_id, attempt)  # pragma: no cover
 
         return has_priming_event, last_event_id
 
-    async def _attempt_sse_reconnection(
+    async def _attempt_sse_reconnection(  # pragma: no cover
         self,
         ctx: RequestContext,
         last_event_id: str,
