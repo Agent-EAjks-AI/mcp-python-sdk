@@ -1952,3 +1952,30 @@ async def test_streamablehttp_client_auto_reconnection(event_server: tuple[Simpl
             assert any("after disconnect" in n for n in notifications_received), (
                 f"Missing 'after disconnect' notification in: {notifications_received}"
             )
+
+
+def test_create_close_sse_stream_callback_without_event_store():
+    """Test that _create_close_sse_stream_callback returns None without event store."""
+    transport = StreamableHTTPServerTransport(
+        mcp_session_id="test-session",
+        event_store=None,  # No event store
+    )
+    callback = transport._create_close_sse_stream_callback("test-request-id")
+    assert callback is None
+
+
+@pytest.mark.anyio
+async def test_create_close_sse_stream_callback_with_event_store():
+    """Test that _create_close_sse_stream_callback returns a working callback with event store."""
+    event_store = SimpleEventStore()
+    transport = StreamableHTTPServerTransport(
+        mcp_session_id="test-session",
+        event_store=event_store,
+    )
+
+    callback = transport._create_close_sse_stream_callback("test-request-id")
+    assert callback is not None
+
+    # The callback should call close_sse_stream which returns False for non-existent stream
+    result = await callback(retry_interval=1000)
+    assert result is False  # No stream to close
