@@ -33,8 +33,8 @@ async def run(url: str) -> None:
                 ClientRequest(
                     CallToolRequest(
                         params=CallToolRequestParams(
-                            name="long_running_task",
-                            arguments={},
+                            name="delay",
+                            arguments={"duration": 3000},
                             task=TaskMetadata(ttl=60000),
                         )
                     )
